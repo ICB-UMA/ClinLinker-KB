@@ -1,8 +1,8 @@
 
 
-# Multilingual Weighted Normalized Temperature Softmax (WNT-Softmax)
+# Clinical Entity Linking in Spanish with Knowledge-Graph Enhanced Biencoders
 
-Welcome to the official repository of the ClinLinker-KB, Clinical Entity Linking in Spanish with Knowledge-Graph Enhanced Biencoders, developed by the Computational Intelligence and Biomedicine (ICB) group at the University of Málaga and Barcelona Super Computing Center (BSC). 
+Welcome to the official repository of the ClinLinker-KB, developed by the Computational Intelligence and Biomedicine (ICB) group at the University of Málaga and Barcelona Super Computing Center (BSC). 
 
 ![ClinLinker-KB architecture for information retrieval and candidate reranking](pics/ClinLinkerKB.png)
 
@@ -18,13 +18,12 @@ Clone the repository and install the required packages:
 
 ```bash
 git clone https://github.com/ICB-UMA/ClinLinker-KB.git
-
-cd ClinLinker-KB
 ```
 
 ### Requirements
 
 ```bash
+cd ClinLinker-KB
 pip install -r requirements
 ```
 
