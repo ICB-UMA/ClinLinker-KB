@@ -1,0 +1,9 @@
+models/*
+preds/*
+venv/*
+venv
+models/*
+data/*
+results/*
+logs/*
+notebooks/application.log
