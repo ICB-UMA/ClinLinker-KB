@@ -53,7 +53,6 @@ python cross_encoder_training.py
 
 - **Multilingual Support:** Capable of processing and understanding multiple languages.
 - **Advanced Machine Learning Techniques:** Utilizes state-of-the-art models and frameworks.
-- **High-Performance Computing:** Initially deployed and tested on an NVIDIA RTX 2080 Ti GPU, though not a mandatory requirement.
 
 ## Contributing
 
