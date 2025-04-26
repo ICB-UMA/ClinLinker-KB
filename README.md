@@ -1,6 +1,6 @@
 
 
-# Clinical Entity Linking in Spanish with Knowledge-Graph Enhanced Biencoders
+# Advancing Representation LLMs with Knowledge Graph Integration for Clinical Entity Normalization in Spanish
 
 Welcome to the official repository of the ClinLinker-KB, developed by the Computational Intelligence and Biomedicine (ICB) group at the University of Málaga and Barcelona Super Computing Center (BSC). 
 
