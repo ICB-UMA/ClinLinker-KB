@@ -1,6 +1,6 @@
 from tqdm.auto import tqdm
 import pandas as pd
-from typing import List, Dict
+from typing import Dict, List, Tuple, Optional
 from crossEncoder import CrossEncoderReranker
 from metrics import calculate_topk_accuracy
 from logger import setup_custom_logger
@@ -9,7 +9,17 @@ Author: Fernando Gallego
 Affiliation: Researcher at the Computational Intelligence (ICB) Group, University of Málaga
 """
 
-def extract_column_names_from_ctl_file(ctl_file_path):
+def extract_column_names_from_ctl_file(
+    ctl_file_path: str) -> List[str]:
+    """
+    Extract column names from a CTL file.
+
+    Args:
+        ctl_file_path (str): Path to the CTL file.
+
+    Returns:
+        List[str]: List of column names extracted from the file.
+    """
     with open(ctl_file_path, 'r') as file:
         lines = file.readlines()
 
@@ -28,128 +38,177 @@ def extract_column_names_from_ctl_file(ctl_file_path):
     return column_names
 
 
-def read_rrf_file_in_chunks(file_path, chunk_size, columns, dtype_dict=None):
-    total_lines = sum(1 for line in open(file_path, 'r', encoding='utf8'))
+def read_rrf_file_in_chunks(
+    file_path: str, 
+    chunk_size: int, 
+    columns: List[str], 
+    dtype_dict: Optional[Dict[str, str]] = None
+) -> pd.DataFrame:
+    """
+    Read an RRF file in chunks and concatenate the chunks into a DataFrame.
+
+    Args:
+        file_path (str): Path to the RRF file.
+        chunk_size (int): Number of lines per chunk.
+        columns (List[str]): List of column names.
+        dtype_dict (Optional[Dict[str, str]]): Dictionary specifying data types for columns.
+
+    Returns:
+        pd.DataFrame: Concatenated DataFrame containing all chunks.
+    """
     chunk_list = []
 
-    with tqdm(total=total_lines, desc="Processing", unit="line") as pbar:
-        for chunk in pd.read_csv(file_path, sep='|', chunksize=chunk_size, na_filter=False, low_memory=False, dtype=dtype_dict):
-            chunk = chunk.iloc[:, :len(columns)]
+    with tqdm(desc="Processing", unit="line") as pbar:
+        for chunk in pd.read_csv(
+            file_path,
+            sep='|',
+            chunksize=chunk_size,
+            na_filter=False,
+            low_memory=True,  
+            dtype=dtype_dict,
+            usecols=range(len(columns)),  
+            names=columns,  
+        ):
             chunk_list.append(chunk)
-            pbar.update(min(chunk_size, total_lines - pbar.n))
+            pbar.update(len(chunk))
 
-    df = pd.concat(chunk_list, axis=0)
-    df.columns = columns
+    df = pd.concat(chunk_list, ignore_index=True)
     return df
 
-def load_corpus_data(corpus):
-    """Load testing data and gazetteer based on the specified corpus."""
-    if corpus == "SympTEMIST":
-        test_df = pd.read_csv("../../../data/SympTEMIST/symptemist-complete_240208/symptemist_test/subtask2-linking/symptemist_tsv_test_subtask2.tsv", sep="\t", header=0, dtype={"code": str})
-        test_df = test_df.rename(columns={'text': 'term'})
-        df_gaz = pd.read_csv("../../../data/SympTEMIST/symptemist-complete_240208/symptemist_gazetteer/symptemist_gazetter_snomed_ES_v2.tsv", sep="\t", header=0, dtype={"code": str})
-        train_df = pd.read_csv("../../../data/SympTEMIST/symptemist-complete_240208/symptemist_train/subtask2-linking/symptemist_tsv_train_subtask2_complete.tsv", sep="\t", header=0, dtype={"code": str})
-        train_df = train_df.rename(columns={'text': 'term'})
-    elif corpus == "MedProcNER":
-        test_df = pd.read_csv("../../../data/MedProcNER/medprocner_gs_train+test+gazz+multilingual+crossmap_230808/medprocner_test/tsv/medprocner_tsv_test_subtask2.tsv", sep="\t", header=0, dtype={"code": str})
-        test_df = test_df.rename(columns={'text': 'term'})
-        df_gaz = pd.read_csv("../../../data/MedProcNER/medprocner_gs_train+test+gazz+multilingual+crossmap_230808/medprocner_gazetteer/gazzeteer_medprocner_v1_noambiguity.tsv", sep="\t", header=0, dtype={"code": str})
-        train_df = pd.read_csv("../../../data/MedProcNER/medprocner_gs_train+test+gazz+multilingual+crossmap_230808/medprocner_train/tsv/medprocner_tsv_train_subtask2.tsv", sep="\t", header=0, dtype={"code": str})
-        train_df = train_df.rename(columns={'text': 'term'})
-    elif corpus == "DisTEMIST":
-        test_df = pd.read_csv("../../../data/DisTEMIST/distemist_zenodo/test_annotated/subtrack2_linking/distemist_subtrack2_test_linking.tsv", sep="\t", header=0, dtype={"code": str})
-        test_df = test_df.rename(columns={'span': 'term'})
-        df_gaz = pd.read_csv("../../../data/DisTEMIST/dictionary_distemist.tsv", sep="\t", header=0, dtype={"code": str})
-        train_df = pd.read_csv("../../../data/DisTEMIST/distemist_zenodo/training/subtrack2_linking/distemist_subtrack2_training2_linking.tsv", sep="\t", header=0, dtype={"code": str})
-        train_df = train_df.rename(columns={'span': 'term'})
-    else:
-        raise ValueError(f"Unsupported corpus: {corpus}")
+def load_corpus_data(
+    base_path: str, 
+    corpus: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Load test, train, and gazetteer data for a specific corpus.
+
+    Args:
+        base_path (str): Base path containing the corpus directories.
+        corpus (str): Name of the corpus ("SympTEMIST", "MedProcNER", or "DisTEMIST").
+
+    Returns:
+        Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]: Test, train, and gazetteer DataFrames.
     
+    Raises:
+        ValueError: If the corpus is not supported.
+    """
+    corpus_paths = {
+        "SympTEMIST": {
+            "test": f"{base_path}/SympTEMIST/symptemist-complete_240208/symptemist_test/subtask2-linking/symptemist_tsv_test_subtask2.tsv",
+            "train": f"{base_path}/SympTEMIST/symptemist-complete_240208/symptemist_train/subtask2-linking/symptemist_tsv_train_subtask2_complete.tsv",
+            "gaz": f"{base_path}/SympTEMIST/symptemist-complete_240208/symptemist_gazetteer/symptemist_gazetter_snomed_ES_v2.tsv"
+        },
+        "MedProcNER": {
+            "test": f"{base_path}/MedProcNER/medprocner_gs_train+test+gazz+multilingual+crossmap_230808/medprocner_test/tsv/medprocner_tsv_test_subtask2.tsv",
+            "train": f"{base_path}/MedProcNER/medprocner_gs_train+test+gazz+multilingual+crossmap_230808/medprocner_train/tsv/medprocner_tsv_train_subtask2.tsv",
+            "gaz": f"{base_path}/MedProcNER/medprocner_gs_train+test+gazz+multilingual+crossmap_230808/medprocner_gazetteer/gazzeteer_medprocner_v1_noambiguity.tsv"
+        },
+        "DisTEMIST": {
+            "test": f"{base_path}/DisTEMIST/distemist_zenodo/test_annotated/subtrack2_linking/distemist_subtrack2_test_linking.tsv",
+            "train": f"{base_path}/DisTEMIST/distemist_zenodo/training/subtrack2_linking/distemist_subtrack2_training2_linking.tsv",
+            "gaz": f"{base_path}/DisTEMIST/dictionary_distemist.tsv"
+        }
+    }
+
+    if corpus not in corpus_paths:
+        raise ValueError(f"Unsupported corpus: {corpus}")
+
+    paths = corpus_paths[corpus]
+    test_df = pd.read_csv(paths["test"], sep="\t", dtype={"code": str})
+    train_df = pd.read_csv(paths["train"], sep="\t", dtype={"code": str})
+    df_gaz = pd.read_csv(paths["gaz"], sep="\t", dtype={"code": str})
+
+    if corpus == "SympTEMIST" or corpus == "MedProcNER":
+        test_df.rename(columns={'text': 'term'}, inplace=True)
+        train_df.rename(columns={'text': 'term'}, inplace=True)
+    elif corpus == "DisTEMIST":
+        test_df.rename(columns={'span': 'term'}, inplace=True)
+        train_df.rename(columns={'span': 'term'}, inplace=True)
+
     return test_df, train_df, df_gaz
 
 
-def evaluate_model(MODEL_NAME: str, gs_df: pd.DataFrame, train_df: pd.DataFrame, gaz_df: pd.DataFrame, top_k_values: List[int]) -> Dict[str, Dict[int, float]]:
+def evaluate_model(
+    model_name: str,
+    f_type: str,
+    max_length: int,
+    train_gaz_df,
+    gs_df,
+    clean_df,
+    um_df,
+    uc_df,
+    gs_results: dict,
+    clean_results: dict,
+    um_results: dict,
+    uc_results: dict,
+    model_map: dict,
+    top_k_values: list,
+    corpus: str
+) -> tuple:
     """
-    Evaluate the model using the provided dataframes and top_k values.
-    
-    :param MODEL_NAME: Name of the model to be used as a key in the result dictionaries.
-    :param gs_df: Gold standard dataframe.
-    :param train_df: Training dataframe.
-    :param gaz_df: Gazetteer dataframe.
-    :param top_k_values: List of k values to calculate the Top-k accuracy.
-    :return: Three dictionaries containing the Top-k accuracy results for gs_df, uc_df, and um_df respectively.
+    Evaluates a given model (bi-encoder) and, if applicable, its associated cross-encoder.
+    Saves the top-k results in the corresponding result dictionaries.
     """
-    # Create the dataframes uc_df and um_df
-    uc_df = gs_df[~gs_df['code'].isin(train_df['code'])]
-    um_df = gs_df[~gs_df['term'].isin(train_df['term'])]
-    
-    # Evaluate the dataframes gs_df, uc_df, and um_df
-    gs_results = calculate_topk_accuracy(gs_df, top_k_values)
-    uc_results = calculate_topk_accuracy(uc_df, top_k_values)
-    um_results = calculate_topk_accuracy(um_df, top_k_values)
-    
-    # Create result dictionaries with the model name as key
-    gs_dict = {MODEL_NAME: gs_results}
-    uc_dict = {MODEL_NAME: uc_results}
-    um_dict = {MODEL_NAME: um_results}
-    
-    return gs_dict, uc_dict, um_dict
+    # Initialize encoder and fit FAISS
+    faiss_encoder = faiss_enc.FaissEncoder(model_name, f_type, max_length, train_gaz_df)
+    faiss_encoder.fit_faiss()
 
-def evaluate_crossencoder(MODEL_NAME: str, crossreranker: CrossEncoderReranker, gs_df: pd.DataFrame, train_df: pd.DataFrame, gaz_df: pd.DataFrame, top_k_values: List[int]) -> Dict[str, Dict[int, float]]:
-    """
-    Evaluate the model using the provided dataframes and top_k values.
-    
-    :param MODEL_NAME: Name of the model to be used as a key in the result dictionaries.
-    :param crossreranker: Cross Encoder model.
-    :param gs_df: Gold standard dataframe.
-    :param train_df: Training dataframe.
-    :param gaz_df: Gazetteer dataframe.
-    :param top_k_values: List of k values to calculate the Top-k accuracy.
-    :return: Three dictionaries containing the Top-k accuracy results for gs_df, uc_df, and um_df respectively.
-    """
-    # Create the dataframes uc_df and um_df
-    gs_reranked_df = crossreranker.rerank_candidates(gs_df, "term", "candidates", "codes")
-    uc_df = gs_df[~gs_reranked_df['code'].isin(train_df['code'])]
-    um_df = gs_df[~gs_reranked_df['term'].isin(train_df['term'])]
-    
-    # Evaluate the dataframes gs_df, uc_df, and um_df
-    gs_results = calculate_topk_accuracy(gs_reranked_df, top_k_values)
-    uc_results = calculate_topk_accuracy(uc_df, top_k_values)
-    um_results = calculate_topk_accuracy(um_df, top_k_values)
-    
-    # Create result dictionaries with the model name as key
-    gs_dict = {MODEL_NAME: gs_results}
-    uc_dict = {MODEL_NAME: uc_results}
-    um_dict = {MODEL_NAME: um_results}
-    
-    return gs_dict, uc_dict, um_dict
+    # Retrieve candidates using FAISS
+    gs_preds = gs_df.copy()
+    gs_preds["candidates"], gs_preds["codes"], _ = faiss_encoder.get_candidates(gs_df["term"].tolist(), k=200)
+
+    clean_preds = clean_df.copy()
+    clean_preds["candidates"], clean_preds["codes"], _ = faiss_encoder.get_candidates(clean_df["term"].tolist(), k=200)
+
+    um_preds = um_df.copy()
+    um_preds["candidates"], um_preds["codes"], _ = faiss_encoder.get_candidates(um_df["term"].tolist(), k=200)
+
+    uc_preds = uc_df.copy()
+    uc_preds["candidates"], uc_preds["codes"], _ = faiss_encoder.get_candidates(uc_df["term"].tolist(), k=200)
+
+    # Define the model key for the results
+    model_key = model_map.get(model_name.split("/")[-1], "None")
+
+    # Save FAISS results
+    gs_results[model_key] = calculate_topk_accuracy(gs_preds, top_k_values)
+    clean_results[model_key] = calculate_topk_accuracy(clean_preds, top_k_values)
+    um_results[model_key] = calculate_topk_accuracy(um_preds, top_k_values)
+    uc_results[model_key] = calculate_topk_accuracy(uc_preds, top_k_values)
+
+    # Check if re-ranking with a cross-encoder is required
+    if model_key in ["ClinLinker", "ClinLinker-KB-P", "ClinLinker-KB-GP"]:
+        # Define the cross-encoder model path template
+        template_map = {
+            "ClinLinker": "Spanish_SapBERT_noparents",
+            "ClinLinker-KB-P": "Spanish_SapBERT_parents",
+            "ClinLinker-KB-GP": "Spanish_SapBERT_grandparents"
+        }
+
+        template = template_map[model_key]
+
+        ce_path = f"/scratch/models/NEL/cross-encoders/{template}/cef_{corpus.lower()}_{template}_sim_cand_200_epoch_1_bs_128"
+
+        ce_reranker = CrossEncoderReranker(model_name=ce_path, model_type="st", max_seq_length=max_length)
+
+        gs_results[model_key + "_CE"] = calculate_topk_accuracy(
+            ce_reranker.rerank_candidates(gs_preds.copy(deep=True), "term", "candidates", "codes"),
+            top_k_values
+        )
+        clean_results[model_key + "_CE"] = calculate_topk_accuracy(
+            ce_reranker.rerank_candidates(clean_preds.copy(deep=True), "term", "candidates", "codes"),
+            top_k_values
+        )
+        um_results[model_key + "_CE"] = calculate_topk_accuracy(
+            ce_reranker.rerank_candidates(um_preds.copy(deep=True), "term", "candidates", "codes"),
+            top_k_values
+        )
+        uc_results[model_key + "_CE"] = calculate_topk_accuracy(
+            ce_reranker.rerank_candidates(uc_preds.copy(deep=True), "term", "candidates", "codes"),
+            top_k_values
+        )
+
+        return gs_results, clean_results, um_results, uc_results
 
 
-
-def results2tsv(results: List[Dict[str, Dict[int, float]]]) -> pd.DataFrame:
-    """
-    Create a DataFrame with top-k accuracies for different models.
-    
-    :param results: List of dictionaries containing model names and their top-k accuracies.
-                    Each dictionary should be in the format:
-                    [{'ModelName': {1: accuracy1, 5: accuracy5, ..., k: accuracyk}}, ...]
-    :return: DataFrame with models as rows and top-k values as columns, containing accuracies as cell values.
-    """
-    # Initialize a list to collect rows for the DataFrame
-    rows = []
-
-    # Process the list of dictionaries
-    for result in results:
-        for model_name, accuracies in result.items():
-            row = {'MODEL_NAME': model_name}
-            for k, accuracy in accuracies.items():
-                row[k] = round(accuracy, 3)
-            rows.append(row)
-
-    # Convert the list of rows to a DataFrame
-    result_df = pd.DataFrame(rows)
-
-    return result_df
 
 
 def calculate_norm(df_gs, df_preds, log_file=None):

@@ -4,161 +4,238 @@ from tqdm.auto import tqdm
 import numpy as np
 import faiss
 import pandas as pd
+from huggingface_hub import login
+from logger import setup_custom_logger
+from typing import List, Tuple, Dict, Optional
 
 
 """
-Author: Luis Gasco Sánchez, Guillermo López García & Fernando Gallego
-Affiliation: Researcher at the Barcelona Supercomputing Center (BSC), Department of Computational Biomedicine, Cedars-Sinai Medical Center & Computational Intelligence (ICB) Group, University of Málaga
+Author: Fernando Gallego, Guillermo López García & Luis Gasco Sánchez
+Affiliation: Researcher at the Computational Intelligence (ICB) Group, University of Málaga & Barcelona Supercomputing Center (BSC)
 """
+# Logger setup
+logger = setup_custom_logger("faiss_encoder")
 
 class FaissEncoder:
     """
-    A class to encode text using a specified transformer model and fit/search using FAISS indices.
+    A class for encoding text using a pre-trained model and performing similarity search with FAISS indices.
 
     Attributes:
-        model (AutoModel): The pre-trained transformer model.
-        tokenizer (AutoTokenizer): Tokenizer for the transformer model.
-        f_type (str): Type of FAISS index to use. Options include "FlatL2" and "FlatIP".
-        vocab (DataFrame): A pandas DataFrame containing terms and their corresponding codes.
-        arr_text (list): List of terms from vocab.
-        arr_codes (list): List of codes corresponding to terms in arr_text.
-        arr_text_id (ndarray): Array of indices for arr_text.
+        model (AutoModel): Pre-trained transformer model.
+        tokenizer (AutoTokenizer): Tokenizer associated with the transformer model.
+        f_type (str): Type of FAISS index ("FlatL2" or "FlatIP").
+        vocab (Optional[pd.DataFrame]): A DataFrame containing terms and their corresponding codes.
+        max_length (int): Maximum token length for the tokenizer.
         device (str): Device to run the model on.
-        faiss_index (Index): The FAISS index for searching encoded texts.
+        faiss_index (Optional[faiss.Index]): The FAISS index for similarity search.
+        verbose (int): If 1, enables progress bars with tqdm. Defaults to 0 (no progress bars).
     """
-    def __init__(self, MODEL_NAME: str, F_TYPE: str, MAX_LENGTH: int, vocab: pd.DataFrame):
+
+    def __init__(
+        self,
+        MODEL_NAME: str,
+        F_TYPE: str,
+        MAX_LENGTH: int,
+        vocab: Optional[pd.DataFrame] = None,
+        verbose: int = 0
+    ):
         """
-        Initializes the encoder with a model and tokenizer, sets up device and prepares the FAISS index type.
+        Initializes the encoder with a specified pre-trained model, tokenizer, and FAISS index type.
 
         Parameters:
-            MODEL_NAME (str): The name or path of the pre-trained model.
-            F_TYPE (str): The type of FAISS index to use.
-            MAX_LENGTH (int): Maximum length of tokens for the tokenizer.
-            vocab (DataFrame): DataFrame containing terms and corresponding codes.
+            MODEL_NAME (str): Name or path of the pre-trained model.
+            F_TYPE (str): Type of FAISS index to use ("FlatL2" or "FlatIP").
+            MAX_LENGTH (int): Maximum token length for the tokenizer.
+            vocab (Optional[pd.DataFrame]): DataFrame containing terms and codes. Optional.
+            verbose (int): If 1, enables progress bars with tqdm. Defaults to 0.
         """
         self.model = AutoModel.from_pretrained(MODEL_NAME)
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
         self.f_type = F_TYPE
         self.vocab = vocab
-        self.arr_text = self.vocab['term'].values.tolist()
-        self.arr_codes = self.vocab['code'].values.tolist()
-        self.arr_text_id = np.arange(len(self.vocab))
         self.max_length = MAX_LENGTH
-
-        # Setup device and DataParallel
+        self.verbose = verbose
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
         if torch.cuda.is_available() and torch.cuda.device_count() > 1:
             self.model = torch.nn.DataParallel(self.model)
         self.model.to(self.device)
 
-    def encode(self, texts, batch_size):
+        if self.vocab is not None:
+            self._initialize_vocab()
+        else:
+            logger.warning("Vocabulary is not initialized. Ensure to set a valid vocabulary before using dependent methods.")
+
+    def _initialize_vocab(self) -> None:
+        """Initializes attributes derived from the vocabulary."""
+        if not {'term', 'code'}.issubset(self.vocab.columns):
+            raise ValueError("The vocabulary must contain 'term' and 'code' columns.")
+        self._arr_text = self.vocab['term'].tolist()
+        self._arr_codes = self.vocab['code'].tolist()
+        self._arr_text_id = np.arange(len(self.vocab))
+        logger.info("Vocabulary initialized successfully.")
+
+    @property
+    def arr_text(self) -> List[str]:
+        if not hasattr(self, '_arr_text'):
+            raise AttributeError("Vocabulary is not initialized. Use a valid vocabulary when creating the class.")
+        return self._arr_text
+
+    @property
+    def arr_codes(self) -> List[str]:
+        if not hasattr(self, '_arr_codes'):
+            raise AttributeError("Vocabulary is not initialized. Use a valid vocabulary when creating the class.")
+        return self._arr_codes
+
+    @property
+    def arr_text_id(self) -> np.ndarray:
+        if not hasattr(self, '_arr_text_id'):
+            raise AttributeError("Vocabulary is not initialized. Use a valid vocabulary when creating the class.")
+        return self._arr_text_id
+
+    def encode(
+        self,
+        texts: List[str],
+        batch_size: int
+    ) -> np.ndarray:
         """
-        Encodes the given texts into embeddings using the transformer model.
+        Encodes a list of texts into embeddings using the transformer model.
 
         Parameters:
-            texts (list): List of text strings to encode.
-            batch_size (int): The size of each batch for processing.
+            texts (List[str]): List of text strings to encode.
+            batch_size (int): Batch size for processing.
 
         Returns:
-            ndarray: A numpy array of embeddings.
+            np.ndarray: Matrix of embeddings.
         """
+        if not texts:
+            raise ValueError("The list of texts is empty.")
+
         all_embeddings = []
-        num_batches = (len(texts) + batch_size - 1) // batch_size
         model = self.model.module if isinstance(self.model, torch.nn.DataParallel) else self.model
 
-        for batch_idx in tqdm(range(num_batches), desc="Encoding"):
-            batch_texts = texts[batch_idx * batch_size : (batch_idx + 1) * batch_size]
-            inputs = self.tokenizer(batch_texts, return_tensors="pt", padding=True, truncation=True, max_length=self.max_length)
+        progress = tqdm(range(0, len(texts), batch_size), desc="Encoding texts", disable=self.verbose == 0)
+        for i in progress:
+            batch_texts = texts[i:i + batch_size]
+            inputs = self.tokenizer(
+                batch_texts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=self.max_length
+            )
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
             with torch.no_grad():
                 outputs = model(**inputs)
-                embeddings = outputs.last_hidden_state.mean(dim=1).detach().cpu().numpy()
+                embeddings = outputs.last_hidden_state.mean(dim=1).cpu().numpy()
                 all_embeddings.append(embeddings)
+
         return np.vstack(all_embeddings)
 
-    def fitFaiss(self, batch_size=32):
+    def fit_faiss(
+        self,
+        batch_size: int = 32
+    ) -> None:
         """
-        Fits the FAISS index using encoded embeddings of the vocabulary terms.
+        Fits the FAISS index using embeddings from the vocabulary.
 
         Parameters:
-            batch_size (int): The size of each batch for encoding texts. Defaults to 32.
-
-        Effects:
-            Initializes and stores the FAISS index with embeddings and associated IDs.
+            batch_size (int): Batch size for encoding. Defaults to 32.
         """
-        embeddings = self.encode(self.arr_text, batch_size)
-        embeddings = embeddings.astype('float32')
-        index_type = faiss.IndexFlatL2 if self.f_type == "FlatL2" else faiss.IndexFlatIP
-        faiss_index = faiss.IndexIDMap(index_type(embeddings.shape[1]))
+        embeddings = self.encode(self.arr_text, batch_size).astype('float32')
+        index_cls = faiss.IndexFlatL2 if self.f_type == "FlatL2" else faiss.IndexFlatIP
+        index = index_cls(embeddings.shape[1])
 
         if self.f_type == "FlatIP":
             faiss.normalize_L2(embeddings)
-        
-        faiss_index.add_with_ids(embeddings, self.arr_text_id)
-        self.faiss_index = faiss_index
 
-    def getCandidates(self, texts, k=200, batch_size=64):
+        self.faiss_index = faiss.IndexIDMap(index)
+        self.faiss_index.add_with_ids(embeddings, self.arr_text_id)
+        logger.info("FAISS index fitted successfully.")
+
+    def get_candidates(
+        self,
+        texts: List[str],
+        k: int = 200,
+        batch_size: int = 64
+    ) -> Tuple[List[List[str]], List[List[str]], List[List[float]]]:
         """
-        Searches the FAISS index to find top candidate terms for the given texts.
+        Retrieves the top-k candidates from the FAISS index for the given texts.
 
         Parameters:
-            texts (list): List of texts to search against the FAISS index.
-            k (int): Number of top candidates to retrieve for each text.
-            batch_size (int): Batch size to use for encoding texts.
+            texts (List[str]): Texts to search against the FAISS index.
+            k (int): Number of top candidates to return. Defaults to 200.
+            batch_size (int): Batch size for encoding. Defaults to 64.
 
         Returns:
-            tuple: Returns three lists containing the candidates, their codes, and similarity scores.
+            Tuple: Unique candidates, corresponding codes, and similarity scores.
         """
-        encoded_entities = self.encode(texts, batch_size).astype('float32')
+        if not hasattr(self, 'faiss_index'):
+            raise AttributeError("FAISS index is not initialized. Run 'fit_faiss' first.")
+
+        embeddings = self.encode(texts, batch_size).astype('float32')
         if self.f_type == "FlatIP":
-            faiss.normalize_L2(encoded_entities)
+            faiss.normalize_L2(embeddings)
 
-        sim, indexes = self.faiss_index.search(encoded_entities, k * 3)
-        return self._process_results(indexes, sim, k)
+        sim, indices = self.faiss_index.search(embeddings, k)
+        return self._process_results(indices, sim, k)
 
-    def _process_results(self, indexes, sim, k):
+    def _process_results(
+        self,
+        indices: np.ndarray,
+        sim: np.ndarray,
+        k: int
+    ) -> Tuple[List[List[str]], List[List[str]], List[List[float]]]:
         """
-        Processes the raw results from FAISS search to ensure uniqueness and order by similarity.
+        Processes FAISS search results to ensure unique candidates.
 
         Parameters:
-            indexes (ndarray): Indices of the candidates from the FAISS search.
-            sim (ndarray): Similarity scores corresponding to the indexes.
+            indices (np.ndarray): Candidate indices from FAISS search.
+            sim (np.ndarray): Similarity scores for candidates.
             k (int): Number of top unique candidates to return.
 
         Returns:
-            tuple: Three lists containing the unique candidates, their codes, and similarity scores.
+            Tuple: Lists of unique candidates, their codes, and similarity scores.
         """
         candidates, candidates_codes, candidates_sims = [], [], []
-        for idx_list, sim_list in zip(indexes, sim):
-            seen_codes, unique_candidates, unique_codes, unique_sims = set(), [], [], []
-            for idx, sim_score in zip(idx_list, sim_list):
-                if idx < len(self.arr_text) and self.arr_codes[idx] not in seen_codes:
-                    seen_codes.add(self.arr_codes[idx])
+
+        for idx_list, sim_list in zip(indices, sim):
+            seen = set()
+            unique_candidates, unique_codes, unique_sims = [], [], []
+            for idx, score in zip(idx_list, sim_list):
+                if idx >= 0 and self.arr_codes[idx] not in seen:
+                    seen.add(self.arr_codes[idx])
                     unique_candidates.append(self.arr_text[idx])
                     unique_codes.append(self.arr_codes[idx])
-                    unique_sims.append(sim_score)
+                    unique_sims.append(score)
                     if len(unique_candidates) == k:
                         break
             candidates.append(unique_candidates)
             candidates_codes.append(unique_codes)
             candidates_sims.append(unique_sims)
-        return candidates, candidates_codes, candidates_sims
 
-    def evaluate(self, eval_df, k_values, batch_size=64):
+        return candidates, candidates_codes, candidates_sims
+    
+
+    def upload_to_hf(
+        self, 
+        repo_name: str, 
+        token: str = None, 
+        private: bool = True):
         """
-        Evaluates the precision of the FAISS index for given terms at multiple k-values.
+        Uploads the current model and tokenizer to the Hugging Face Hub and can make the repository private.
 
         Parameters:
-            eval_df (DataFrame): DataFrame containing the terms and correct codes for evaluation.
-            k_values (list): List of k-values at which to evaluate precision.
-            batch_size (int): Batch size to use for encoding texts.
-
-        Returns:
-            dict: A dictionary mapping each k-value to its corresponding precision.
+            repo_name (str): Name of the Hugging Face repository (e.g., "username/repo_name").
+            token (str): Hugging Face authentication token. If not provided, will prompt for login.
+            private (bool): Whether to make the repository private. Defaults to True.
         """
-        _, candidates_codes, _ = self.getCandidates(eval_df['term'].tolist(), max(k_values) + 150, batch_size)
-        precision_at_k = {}
-        for k in k_values:
-            correct_predictions = sum(1 for true_code, candidates in zip(eval_df['code'], candidates_codes) if true_code in candidates[:k])
-            precision_at_k[k] = correct_predictions / len(eval_df)
-        return precision_at_k
+        if token:
+            login(token=token)
+        else:
+            login()  # Prompt for token if not provided
+
+        # Upload model and tokenizer to the specified Hugging Face repository with the private option
+        self.model.push_to_hub(repo_name, private=private)
+        self.tokenizer.push_to_hub(repo_name, private=private)
+        print(f"Model and tokenizer uploaded to the repository {repo_name} on Hugging Face (private={private}).")

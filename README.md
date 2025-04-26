@@ -34,12 +34,15 @@ The repository includes scripts for data generation and model training. Here are
 ### Data Generation
 
 Create your own data from:
-
-
 ```bash
-generate_pretraining_data.ipynb
+triplets_definition.ipynb
+
 ```
 
+
+### Train your bi-encoder using SapBERT with the new triplets
+
+https://github.com/cambridgeltl/sapbert
 
 ### Train your cross-encoder
 
